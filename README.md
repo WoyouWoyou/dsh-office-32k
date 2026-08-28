@@ -26,9 +26,6 @@ agent-presets/office/          # 插件本体（DSH Agent Preset）
 └── skills/
     ├── excel/SKILL.md         # Excel 技能
     └── word/SKILL.md          # Word 技能
-scripts/
-├── repack-portable.ps1        # 便携版重新打包脚本（剔除运行时产物、零链接校验、tar 打包）
-└── analyze-session.mjs        # 会话日志工具调用统计分析
 ```
 
 ## 安装
