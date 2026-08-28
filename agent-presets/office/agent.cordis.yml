@@ -1,0 +1,207 @@
+# The `office` agent preset: a 32K-context office-document assistant.
+#
+# Purpose: one session mode for spreadsheet and word-processing work on a
+# model whose real context window is 32768 tokens. Two things make that true:
+#
+# 1. The model's `contextWindow` is declared as 32768 in the host model route
+#    (settings.yaml / the Models page). The preset cannot change the host
+#    route, so this file is written to be correct GIVEN that declaration:
+#    `compaction-basic` keeps the default 0.8 threshold (~26K compact trigger)
+#    and pins an absolute 8192-token retention, plus retries, so long
+#    conversations and large documents never overflow the API limit.
+# 2. The persona owns a hard context budget: concise output, chunked reads,
+#    results written to files instead of pasted into the conversation.
+#
+# The tool catalog is deliberately LEAN (no delegation, workflows, web search,
+# goals, or plan mode): a smaller catalog leaves more of the 32K window for
+# document content. Extend by copying this preset and adding rows.
+#
+# This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+# standing scope; every session naming it joins by scope parentage, so the
+# tools and prompt sections registered here cover each joined agent while a
+# session's own state stays keyed per Session/Agent inside the plugins. The
+# host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+# preset must not own: the registries themselves, the sandbox and approval
+# stack, persistence, and the model route.
+#
+# A service row here MUST sit inside a group carrying an `isolate` realm.
+# Without one it publishes into the root realm, where it is process-global —
+# another preset publishing the same name collides, and a host reader would
+# resolve one preset's instance for every session; `dsh-agent-presets` rejects
+# that at mount. `true` means an entry-local realm: this standing mount's own
+# private instance, apart from every other preset's.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# The preset's own persona, shadowing the deployment default for this agent.
+# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      你是一名办公文档处理助手，运行在 DeepSeek Harness 中，由 {{model}} 模型驱动。
+      你的工作目录是 {{cwd}}。
+
+      【32K 上下文模式】
+      模型的上下文窗口是 32768 tokens（输入+输出合计），单次输出上限 8192 tokens，
+      输入预算约 24K tokens。注意：系统按 4 字符 = 1 token 估算，中文实际约
+      2 字符 = 1 token（被低估约 2 倍），所以系统会在输入压力约 10K（估算值，
+      约等于中文实际 20K+）时自动压缩旧内容，只保留最近约 5K tokens（估算）。
+      宁可多压缩，不可超限；超限由溢出恢复机制兜底重试。
+
+      【任务必须细粒度分解（最高优先）】
+      - 把任务拆成小步骤，每步只做一件可验证的小事；一个脚本只干一件事。
+      - 标准顺序：先探查（文件结构/表头/前几行）→ 写最小脚本 → 只跑一小部分
+        数据验证正确 → 再全量执行 → 校验输出文件 → 汇报。
+      - 每步的产物（脚本、中间结果、最终文档）都落盘到工作目录；失败时
+        读取错误、修改对应的小脚本、从断点继续，绝不重头再来。
+      - 绝不在对话里重复贴大段错误日志、大段代码或大段输出；只贴关键错误行
+        和你的修复动作，其余内容写文件。
+      - 宁可多跑几个小脚本，也不要把大任务塞进一个脚本或一条命令。
+
+      【离线依赖（禁止联网/COM/tempfile）】
+      - 所有 Python 依赖来自离线包 D:\offline-deps-example：
+        · 工作区 .office-deps 已预置 docx / openpyxl / et_xmlfile / typing_extensions，
+          直接 `$env:PYTHONPATH = ".office-deps"` 使用，无需任何安装。
+        · 需要 pandas/numpy 时用离线便携 Python 3.11：
+          D:\offline-deps-example\deps\runtime\python\python.exe。
+      - 禁止：pip install、联网下载、Invoke-WebRequest、Word/Excel COM 接口、
+        tempfile / mkdtemp、把任何文件写到工作区之外（如 D:\ 离线包目录、系统 Python 目录）、
+        解压文件名含 cp311/cp312/cp313 的编译 wheel（装不进本机 Python）。
+      - import 检查通过后【立即开始任务】；禁止继续装包/解压/反复验证的"加固环境"循环。
+      - 缺依赖时：直接告诉用户需要一次性离线安装并给出命令，不要反复尝试。
+
+      【工具调用纪律】
+      - 调用 read / edit / write / glob 等工具前，确认参数齐全（路径、内容、old_string 等）。
+      - **edit / write 的参数名是 `old_string` / `new_string`（不是 old_str / new_str），
+        也没有 `command` 字段**；写脚本优先用 write 全量重写，不要逐段 str_replace 补丁。
+      - 写脚本用新文件名（不要覆盖已存在的文件，沙箱对已存在文件只读）。
+      - 每轮工具调用后检查返回，失败就改小步骤重试，不重复同样调用。
+
+      【修复与重试纪律（32K 关键）】
+      - 脚本报错后：先读错误和脚本，判断是 API 用法还是数据问题，一次改一处，然后最小验证。
+      - **同一工具调用被拒绝（INVALID_ARGS 等）达到 2 次：立即停止重试同一形状**，
+        改用 write 全量重写或换工具；绝不反复改参数名再试。
+      - 写完脚本先跑最小冒烟（只读前几行 / 生成小样例），确认 API 用法正确后再全量执行。
+
+      【输出与文件纪律】
+      - 单次回复绝不超过 8192 tokens 输出上限；大段结果写入文件而不是贴进对话。
+      - 读取大型 Excel / Word 文档时，先探查结构，只提取需要的部分。
+      - 处理完一批数据后，用摘要代替原文继续工作。
+      - 生成或修改后的文件放在工作目录下，并在最后明确告知用户文件路径。
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    # Instructions files share the 32K window; cap them far below the
+    # standard preset's 64 KiB so a large AGENTS.md cannot eat the budget.
+    maxBytes: 8192
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+# Both shell tools consume the host registry from here; their executors
+# (`bash-sandbox`/`pwsh-sandbox`) are host-plane too. `tool-pwsh` is the
+# primary executor on this deployment (Windows), where Python and
+# WPS/Office COM automation run.
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+# Both register into the host `tools` registry and provide nothing, so
+# they need no realm. The `fs` service and its policy stay in the host.
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# NOTE: `str_replace_editor` is deliberately NOT mounted. Local 32B models
+# misremember its argument names (old_str/new_str vs old_string/new_string),
+# producing repeated INVALID_ARGS that burn the 32K budget. Scripts are the
+# main work here, and `write` (full rewrite) + `edit` cover them more
+# reliably. Sidecar text edits also go through write/edit.
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+# Only the model-facing controls. The task REGISTRY stays on the host plane
+# (see `standard` for the reasoning); what a preset chooses is whether its
+# agent can collect and stop background work at all.
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+# The skill REGISTRY lives in the host composition and is layered per scope:
+# these rows register into THIS preset's layer of it, so they need no realm.
+# The excel/word skills ship inside this preset's `skills/` directory and
+# travel with it — `baseUrl` is the preset's own directory, so the root
+# resolves wherever the preset is installed (same pattern as the `cordis`
+# preset).
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner
+# must share this realm rather than sit outside it.
+#
+# `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
+# plane (it owns the context-meter projection units the browser reads), and
+# the rows here resolve that one instance.
+#
+# Policy for a declared 32768-token window with 8192 output:
+# the token meter prices 4 chars/token while CJK is ~2 chars/token, so
+# measured pressure UNDERSTATES Chinese input ~2x. thresholdRatio 0.3 →
+# compact at ~9.8K MEASURED input ≈ ~20-24K real CJK input, leaving the
+# 8K output inside the window with headroom; retention 5120 measured ≈
+# ~10-13K real. Overflow recovery (maxOverflowRetries) is the backstop.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        thresholdRatio: 0.3
+        retainTokens: 5120
+        compactionRetries: 2
+        maxOverflowRetries: 2
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        # 8K chars ≈ ~4K real CJK tokens per tool result — one result must
+        # not flood the 32K window between compaction steps.
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true

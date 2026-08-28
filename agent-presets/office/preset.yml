@@ -1,0 +1,3 @@
+name: 办公文档·32K 模式
+description: 32K 上下文的办公文档处理 Agent：读取分析、修改编辑、新建生成 Excel / Word / CSV 文档，附带自动上下文压缩与大文件分块处理。
+order: 5

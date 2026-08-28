@@ -1,0 +1,17 @@
+# build / runtime artifacts
+node_modules/
+dist/
+*.zip
+.dsh-home/
+sessions/
+
+# credentials & secrets — never commit
+*.credentials.yaml
+credentials.yaml
+.env
+*.key
+
+# test / scratch
+_t*
+__*
+*.log
