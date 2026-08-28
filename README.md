@@ -1,5 +1,7 @@
 # DSH · 办公文档·32K 模式（Agent Preset 插件）
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 打造的 **32K 上下文办公文档 Agent 预设**：
 在窄上下文（32768 = 输入+输出，输出上限 8192）的本地模型上，稳定地处理 **Excel / Word / PPT / CSV**，
 全程离线、数据不出本机。
